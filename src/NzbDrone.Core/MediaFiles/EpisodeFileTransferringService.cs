@@ -1,0 +1,157 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using NLog;
+using NzbDrone.Common.Disk;
+using NzbDrone.Common.EnsureThat;
+using NzbDrone.Common.Extensions;
+using NzbDrone.Core.MediaFiles.EpisodeImport;
+using NzbDrone.Core.MediaFiles.Events;
+using NzbDrone.Core.Messaging.Events;
+using NzbDrone.Core.Organizer;
+using NzbDrone.Core.Parser.Model;
+using NzbDrone.Core.Tv;
+
+namespace NzbDrone.Core.MediaFiles
+{
+    public abstract class EpisodeFileTransferringService
+    {
+        private readonly IUpdateEpisodeFileService _updateEpisodeFileService;
+        protected readonly IBuildFileNames _buildFileNames;
+        private readonly IDiskProvider _diskProvider;
+        private readonly IMediaFileAttributeService _mediaFileAttributeService;
+        private readonly IEventAggregator _eventAggregator;
+        private readonly Logger _logger;
+
+        public EpisodeFileTransferringService(IUpdateEpisodeFileService updateEpisodeFileService,
+                                IBuildFileNames buildFileNames,
+                                IDiskProvider diskProvider,
+                                IMediaFileAttributeService mediaFileAttributeService,
+                                IEventAggregator eventAggregator,
+                                Logger logger)
+        {
+            _updateEpisodeFileService = updateEpisodeFileService;
+            _buildFileNames = buildFileNames;
+            _diskProvider = diskProvider;
+            _mediaFileAttributeService = mediaFileAttributeService;
+            _eventAggregator = eventAggregator;
+            _logger = logger;
+        }
+
+        protected abstract void ExecuteTransfer(string episodeFilePath, string destinationFilePath, TransferMode mode, ScriptImportDecisionInfo scriptImportDecisionInfo);
+
+        protected EpisodeFile TransferFile(EpisodeFile episodeFile, Series series, List<Episode> episodes, string destinationFilePath, TransferMode mode, ScriptImportDecisionInfo scriptImportDecisionInfo = null)
+        {
+            Ensure.That(episodeFile, () => episodeFile).IsNotNull();
+            Ensure.That(series, () => series).IsNotNull();
+            Ensure.That(destinationFilePath, () => destinationFilePath).IsValidPath(PathValidationType.CurrentOs);
+
+            var episodeFilePath = episodeFile.Path ?? Path.Combine(series.Path, episodeFile.RelativePath);
+
+            if (!_diskProvider.FileExists(episodeFilePath))
+            {
+                throw new FileNotFoundException("Episode file path does not exist", episodeFilePath);
+            }
+
+            if (episodeFilePath == destinationFilePath)
+            {
+                throw new SameFilenameException("File not moved, source and destination are the same", episodeFilePath);
+            }
+
+            episodeFile.RelativePath = series.Path.GetRelativePath(destinationFilePath);
+
+            ExecuteTransfer(episodeFilePath, destinationFilePath, mode, scriptImportDecisionInfo);
+
+            _updateEpisodeFileService.ChangeFileDateForFile(episodeFile, series, episodes);
+
+            try
+            {
+                _mediaFileAttributeService.SetFolderLastWriteTime(series.Path, episodeFile.DateAdded);
+
+                if (series.SeasonFolder)
+                {
+                    var seasonFolder = Path.GetDirectoryName(destinationFilePath);
+
+                    _mediaFileAttributeService.SetFolderLastWriteTime(seasonFolder, episodeFile.DateAdded);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(ex, "Unable to set last write time");
+            }
+
+            _mediaFileAttributeService.SetFilePermissions(destinationFilePath);
+
+            return episodeFile;
+        }
+
+        protected void EnsureEpisodeFolder(EpisodeFile episodeFile, LocalEpisode localEpisode, string filePath)
+        {
+            EnsureEpisodeFolder(episodeFile, localEpisode.Series, localEpisode.SeasonNumber, filePath);
+        }
+
+        protected void EnsureEpisodeFolder(EpisodeFile episodeFile, Series series, int seasonNumber, string filePath)
+        {
+            var episodeFolder = Path.GetDirectoryName(filePath);
+            var seasonFolder = _buildFileNames.BuildSeasonPath(series, seasonNumber);
+            var seriesFolder = series.Path;
+            var rootFolder = new OsPath(seriesFolder).Directory.FullPath;
+
+            if (!_diskProvider.FolderExists(rootFolder))
+            {
+                throw new RootFolderNotFoundException(string.Format("Root folder '{0}' was not found.", rootFolder));
+            }
+
+            var changed = false;
+            var newEvent = new EpisodeFolderCreatedEvent(series, episodeFile);
+
+            if (!_diskProvider.FolderExists(seriesFolder))
+            {
+                CreateFolder(seriesFolder);
+                newEvent.SeriesFolder = seriesFolder;
+                changed = true;
+            }
+
+            if (seriesFolder != seasonFolder && !_diskProvider.FolderExists(seasonFolder))
+            {
+                CreateFolder(seasonFolder);
+                newEvent.SeasonFolder = seasonFolder;
+                changed = true;
+            }
+
+            if (seasonFolder != episodeFolder && !_diskProvider.FolderExists(episodeFolder))
+            {
+                CreateFolder(episodeFolder);
+                newEvent.EpisodeFolder = episodeFolder;
+                changed = true;
+            }
+
+            if (changed)
+            {
+                _eventAggregator.PublishEvent(newEvent);
+            }
+        }
+
+        private void CreateFolder(string directoryName)
+        {
+            Ensure.That(directoryName, () => directoryName).IsNotNullOrWhiteSpace();
+
+            var parentFolder = new OsPath(directoryName).Directory.FullPath;
+            if (!_diskProvider.FolderExists(parentFolder))
+            {
+                CreateFolder(parentFolder);
+            }
+
+            try
+            {
+                _diskProvider.CreateFolder(directoryName);
+            }
+            catch (IOException ex)
+            {
+                _logger.Error(ex, "Unable to create directory: {0}", directoryName);
+            }
+
+            _mediaFileAttributeService.SetFolderPermissions(directoryName);
+        }
+    }
+}

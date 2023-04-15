@@ -27,7 +27,7 @@ namespace NzbDrone.Core.MediaFiles
     {
         private readonly ISeriesService _seriesService;
         private readonly IMediaFileService _mediaFileService;
-        private readonly IMoveEpisodeFiles _episodeFileMover;
+        private readonly IRenameEpisodeFiles _episodeFileRenamer;
         private readonly IEventAggregator _eventAggregator;
         private readonly IEpisodeService _episodeService;
         private readonly IBuildFileNames _filenameBuilder;
@@ -36,7 +36,7 @@ namespace NzbDrone.Core.MediaFiles
 
         public RenameEpisodeFileService(ISeriesService seriesService,
                                         IMediaFileService mediaFileService,
-                                        IMoveEpisodeFiles episodeFileMover,
+                                        IRenameEpisodeFiles episodeFileRenamer,
                                         IEventAggregator eventAggregator,
                                         IEpisodeService episodeService,
                                         IBuildFileNames filenameBuilder,
@@ -45,7 +45,7 @@ namespace NzbDrone.Core.MediaFiles
         {
             _seriesService = seriesService;
             _mediaFileService = mediaFileService;
-            _episodeFileMover = episodeFileMover;
+            _episodeFileRenamer = episodeFileRenamer;
             _eventAggregator = eventAggregator;
             _episodeService = episodeService;
             _filenameBuilder = filenameBuilder;
@@ -119,7 +119,7 @@ namespace NzbDrone.Core.MediaFiles
                 try
                 {
                     _logger.Debug("Renaming episode file: {0}", episodeFile);
-                    _episodeFileMover.MoveEpisodeFile(episodeFile, series);
+                    _episodeFileRenamer.MoveEpisodeFile(episodeFile, series);
 
                     _mediaFileService.Update(episodeFile);
 
